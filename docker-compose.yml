@@ -1,0 +1,34 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: mech-yolo-backend
+    ports:
+      - "8888:8000"
+    volumes:
+      - ./runtime:/data
+    environment:
+      DATA_ROOT: /data
+      ACTIVE_MODEL_PATH: /data/models/active/best.pt
+      CORS_ORIGINS: "*"
+      OCR_FIVE_FIELDS_URL: ${OCR_FIVE_FIELDS_URL:-http://host.docker.internal:5000/api/ocr-five-fields}
+      OCR_FIVE_FIELDS_ENGINE: ${OCR_FIVE_FIELDS_ENGINE:-auto+qwen}
+      OCR_FIVE_FIELDS_TIMEOUT: ${OCR_FIVE_FIELDS_TIMEOUT:-180}
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    gpus: all
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    shm_size: "16gb"
+    ipc: host
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: mech-yolo-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
