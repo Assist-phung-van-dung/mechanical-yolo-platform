@@ -5,7 +5,7 @@ import { Badge, Button, Card, EmptyState, Input, PageHeader } from '../component
 
 export default function Demo() {
   const [file, setFile] = useState(null)
-  const [dpi, setDpi] = useState(300)
+  const [dpi, setDpi] = useState(400)
   const [conf, setConf] = useState(0.25)
   const [imgsz, setImgsz] = useState(1536)
   const [ocr, setOcr] = useState(true)

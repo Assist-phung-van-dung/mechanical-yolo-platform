@@ -20,6 +20,8 @@ def ensure_storage(settings: Settings) -> None:
         settings.annotations_dir,
         settings.yolo_labels_dir,
         settings.review_dir,
+        settings.batch_eval_dir,
+        settings.batch_eval_dir / "jobs",
         settings.imports_dir,
         settings.pdf_imports_dir,
         settings.cvat_imports_dir,

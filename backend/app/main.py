@@ -3,13 +3,26 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from app.core.config import FIELD_COLORS, FIELD_NAMES, get_settings
-from app.core.storage import ensure_storage, safe_filename, path_to_url
+from app.core.storage import ensure_storage, safe_filename, path_to_url, read_json
 from app.services.crop_service import crop_bbox
+from app.services.batch_eval_service import (
+    create_batch_job,
+    process_batch_job,
+    get_batch_job,
+    list_batch_jobs,
+    list_job_items,
+    delete_batch_job,
+    update_item_review,
+    export_batch_csv,
+    job_dir,
+    item_json_path,
+)
 from app.services.dataset_service import list_datasets, prepare_cvat_yolo_zip
 from app.services.library_service import (
     build_dataset_from_confirmed,
@@ -383,7 +396,7 @@ async def run_pdf_extraction(
 @app.post("/api/extract")
 async def extract_pdf(
     file: UploadFile = File(...),
-    dpi: int = Form(300),
+    dpi: int = Form(400),
     conf: float = Form(0.25),
     imgsz: int = Form(1536),
     run_ocr: Optional[bool] = Form(None),
@@ -410,7 +423,7 @@ async def extract_pdf(
 @app.post("/api/v1/extract-fields")
 async def extract_fields_api(
     file: UploadFile = File(...),
-    dpi: int = Form(300),
+    dpi: int = Form(400),
     conf: float = Form(0.25),
     imgsz: int = Form(1536),
     run_ocr: bool = Form(True),
@@ -476,7 +489,7 @@ def pdfs(
 async def upload_pdf_library_endpoint(
     file: UploadFile = File(...),
     render: bool = Form(True),
-    dpi: int = Form(300),
+    dpi: int = Form(400),
 ):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Please upload a PDF file")
@@ -487,7 +500,7 @@ async def upload_pdf_library_endpoint(
 def import_pdf_folder_endpoint(
     folder: str = Form("/data/imports/pdfs"),
     render: bool = Form(True),
-    dpi: int = Form(300),
+    dpi: int = Form(400),
     recursive: bool = Form(True),
     prelabel: bool = Form(False),
     conf: float = Form(0.25),
@@ -548,7 +561,7 @@ def import_cvat_folder_endpoint(
 @app.post("/api/pdfs/{pdf_id}/render")
 def render_pdf_endpoint(
     pdf_id: str,
-    dpi: int = Form(300),
+    dpi: int = Form(400),
     force: bool = Form(False),
 ):
     try:
@@ -787,6 +800,180 @@ def build_from_confirmed(
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+
+# -----------------------------------------------------------------------------
+# Batch Evaluation workflow
+# -----------------------------------------------------------------------------
+
+
+@app.post("/api/batch-eval/start")
+async def start_batch_evaluation(
+    background_tasks: BackgroundTasks,
+    files: Optional[list[UploadFile]] = File(None),
+    source_mode: str = Form("upload"),
+    limit: int = Form(100),
+    dpi: int = Form(400),
+    conf: float = Form(0.15),
+    imgsz: int = Form(1536),
+    run_ocr: bool = Form(False),
+    ocr_engine: str = Form("auto+qwen"),
+    random_seed: Optional[int] = Form(None),
+    campaign_name: str = Form(""),
+):
+    """Start an async batch evaluation job.
+
+    Input modes:
+    - upload: multipart files[] PDFs.
+    - random_imports: if no files are uploaded, randomly select PDFs from /data/imports/pdfs.
+
+    OCR is intentionally OFF by default because this page is primarily for
+    YOLO/crop evaluation. Completed items appear in the UI as soon as each PDF
+    is processed.
+    """
+    uploaded: list[tuple[str, bytes]] = []
+    if files:
+        for f in files:
+            if not f.filename:
+                continue
+            if not f.filename.lower().endswith(".pdf"):
+                continue
+            uploaded.append((f.filename, await f.read()))
+
+    job = create_batch_job(
+        settings,
+        source_mode=source_mode,
+        uploaded_files=uploaded,
+        limit=limit,
+        dpi=dpi,
+        conf=conf,
+        imgsz=imgsz,
+        run_ocr=run_ocr,
+        ocr_engine=ocr_engine,
+        random_seed=random_seed,
+        campaign_name=campaign_name,
+    )
+
+    background_tasks.add_task(
+        process_batch_job,
+        settings,
+        yolo_service,
+        job["job_id"],
+        ocr_endpoint=_get_ocr_url(),
+        ocr_timeout=_get_ocr_timeout(),
+    )
+
+    return job
+
+
+
+
+@app.get("/api/batch-eval/jobs")
+def list_batch_evaluation_jobs(limit: int = Query(200)):
+    return {"jobs": list_batch_jobs(settings, limit=limit)}
+
+@app.delete("/api/batch-eval/{job_id}")
+def delete_batch_evaluation_job(job_id: str):
+    try:
+        return delete_batch_job(settings, job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Batch evaluation job not found") from exc
+
+
+@app.get("/api/batch-eval/{job_id}")
+def get_batch_evaluation(job_id: str, include_items: bool = Query(True), after: int = Query(0)):
+    try:
+        return get_batch_job(settings, job_id, include_items=include_items, after=after)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Batch evaluation job not found") from exc
+
+
+@app.get("/api/batch-eval/{job_id}/items")
+def get_batch_evaluation_items(job_id: str, after: int = Query(0), limit: int = Query(500)):
+    try:
+        return {"items": list_job_items(settings, job_id, after=after, limit=limit)}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Batch evaluation job not found") from exc
+
+
+@app.post("/api/batch-eval/{job_id}/items/{item_id}/review")
+def review_batch_evaluation_item(job_id: str, item_id: str, payload: dict = Body(...)):
+    try:
+        return update_item_review(settings, job_id, item_id, payload)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Batch evaluation item not found") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+
+@app.post("/api/batch-eval/{job_id}/items/{item_id}/send-to-label")
+def send_batch_item_to_label_workspace(
+    job_id: str,
+    item_id: str,
+    dpi: int = Form(400),
+):
+    """Promote a batch-evaluation PDF into the PDF Library and seed draft labels.
+
+    This is useful when a batch item is wrong and should become training data.
+    The promoted page can then be opened in Label Workspace for correction.
+    """
+    path = item_json_path(settings, job_id, item_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Batch evaluation item not found")
+
+    item = read_json(path, {}) or {}
+    pdf_path = Path(item.get("source_pdf_path") or "")
+    if not pdf_path.exists():
+        raise HTTPException(status_code=404, detail="Source PDF not found")
+
+    try:
+        doc = upload_pdf_to_library(settings, pdf_path.name, pdf_path.read_bytes(), render=True, dpi=dpi)
+        pdf_id = doc.get("pdf_id")
+        result = item.get("result") or {}
+        labels = {}
+        for field_name, field in (result.get("fields") or {}).items():
+            if field_name not in FIELD_NAMES:
+                continue
+            if not field.get("detected") or not field.get("bbox"):
+                continue
+            labels[field_name] = {
+                "bbox": field["bbox"],
+                "source": "yolo_batch",
+                "confidence": field.get("confidence"),
+                "confirmed": False,
+            }
+        annotation = save_annotation(
+            settings,
+            pdf_id,
+            1,
+            {"status": "draft", "labels": labels},
+            status="draft",
+            history_reason="batch_send_to_label",
+        )
+        return {
+            "ok": True,
+            "document": doc,
+            "annotation": annotation,
+            "label_target": {"pdfId": pdf_id, "page": 1},
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/batch-eval/{job_id}/export.csv")
+def export_batch_evaluation_csv(job_id: str):
+    try:
+        out_path = job_dir(settings, job_id) / "batch_evaluation_export.csv"
+        export_batch_csv(settings, job_id, out_path)
+        return FileResponse(
+            path=str(out_path),
+            media_type="text/csv",
+            filename=f"{job_id}_batch_evaluation.csv",
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Batch evaluation job not found") from exc
 
 
 # -----------------------------------------------------------------------------

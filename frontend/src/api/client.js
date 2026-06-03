@@ -23,6 +23,12 @@ export async function apiPostJson(path, payload = {}) {
   return res.json()
 }
 
+export async function apiDelete(path) {
+  const res = await fetch(path, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await safeError(res))
+  return res.json()
+}
+
 async function safeError(res) {
   try {
     const payload = await res.json()
@@ -34,18 +40,18 @@ async function safeError(res) {
 
 export const fieldNames = [
   'id_drawing',
-  'material',
-  'quantity',
   'spare_part_name',
   'spare_part_number',
+  'quantity',
+  'material',
 ]
 
 export const fieldColors = {
   id_drawing: '#38bdf8',
-  material: '#22c55e',
-  quantity: '#f59e0b',
   spare_part_name: '#a78bfa',
   spare_part_number: '#fb7185',
+  quantity: '#f59e0b',
+  material: '#22c55e',
 }
 
 export function formatFieldName(name) {

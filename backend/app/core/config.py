@@ -78,6 +78,10 @@ class Settings(BaseSettings):
         return self.data_root / "review"
 
     @property
+    def batch_eval_dir(self) -> Path:
+        return self.data_root / "batch_eval"
+
+    @property
     def imports_dir(self) -> Path:
         return self.data_root / "imports"
 
